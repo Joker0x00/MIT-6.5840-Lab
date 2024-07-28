@@ -1,5 +1,5 @@
 # 6.8540 Lab
-- [ ] lab1
+- [x] [lab1](src/mr/README.md)
 - [ ] lab2
     - [ ] lab2A
     - [ ] lab2B
