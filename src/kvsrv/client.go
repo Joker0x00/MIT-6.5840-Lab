@@ -1,13 +1,23 @@
 package kvsrv
 
-import "6.5840/labrpc"
-import "crypto/rand"
-import "math/big"
+import (
+	"crypto/rand"
+	"log"
+	"math/big"
+	"sync"
+	"time"
 
+	"6.5840/labrpc"
+)
 
 type Clerk struct {
 	server *labrpc.ClientEnd
 	// You will have to modify this struct.
+	id             int64
+	req            int
+	retryTime      time.Duration
+	requestTimeout time.Duration
+	mtx            sync.Mutex
 }
 
 func nrand() int64 {
@@ -21,6 +31,11 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 	ck := new(Clerk)
 	ck.server = server
 	// You'll have to add code here.
+	ck.id = nrand()
+	ck.req = 0
+	ck.retryTime = 50 * time.Millisecond
+	ck.requestTimeout = 500 * time.Millisecond
+	ck.mtx = sync.Mutex{}
 	return ck
 }
 
@@ -35,9 +50,31 @@ func MakeClerk(server *labrpc.ClientEnd) *Clerk {
 // must match the declared types of the RPC handler function's
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) Get(key string) string {
-
 	// You will have to modify this function.
-	return ""
+	args := GetArgs{
+		Key: key,
+		Id:  ck.id,
+		Req: ck.req,
+	}
+	reply := GetReply{}
+
+	for {
+		select {
+		case <-time.After(ck.requestTimeout):
+			{
+				log.Fatalf("get rpc timeout")
+				return ""
+			}
+		default:
+			// log.Printf("client %v get, req: %v", ck.id, ck.req)
+			ok := ck.server.Call("KVServer.Get", &args, &reply)
+			if ok {
+				return reply.Value
+			}
+			// log.Printf("client %v failed, retry...", ck.id)
+			time.Sleep(ck.retryTime)
+		}
+	}
 }
 
 // shared by Put and Append.
@@ -50,7 +87,34 @@ func (ck *Clerk) Get(key string) string {
 // arguments. and reply must be passed as a pointer.
 func (ck *Clerk) PutAppend(key string, value string, op string) string {
 	// You will have to modify this function.
-	return ""
+	args := PutAppendArgs{
+		Key:   key,
+		Value: value,
+		Id:    ck.id,
+		Req:   ck.req,
+	}
+	reply := PutAppendReply{}
+
+	for {
+		select {
+		case <-time.After(ck.requestTimeout):
+			{
+				log.Fatalf("putAppend rpc timeout")
+				return ""
+			}
+		default:
+			// log.Printf("client %v %v, req: %v, k: %v, v: %v", ck.id, op, ck.req, key, value)
+			ok := ck.server.Call("KVServer."+op, &args, &reply)
+			if ok {
+				ck.req++
+				// ck.Ack(ck.req)
+				return reply.Value
+			}
+			// log.Printf("client %v failed, retry...", ck.id)
+			time.Sleep(ck.retryTime)
+		}
+	}
+
 }
 
 func (ck *Clerk) Put(key string, value string) {

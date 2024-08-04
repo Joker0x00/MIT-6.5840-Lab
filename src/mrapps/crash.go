@@ -8,15 +8,19 @@ package main
 // go build -buildmode=plugin crash.go
 //
 
-import "6.5840/mr"
-import crand "crypto/rand"
-import "math/big"
-import "strings"
-import "os"
-import "sort"
-import "strconv"
-import "time"
+import (
+	crand "crypto/rand"
+	"math/big"
+	"os"
+	"sort"
+	"strconv"
+	"strings"
+	"time"
 
+	"6.5840/mr"
+)
+
+// 测试worker崩溃超时对Master的影响
 func maybeCrash() {
 	max := big.NewInt(1000)
 	rr, _ := crand.Int(crand.Reader, max)
