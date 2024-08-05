@@ -12,7 +12,7 @@ Lab 地址
 
 可能发生的情况如下图所示：
 
-![](https://secure2.wostatic.cn/static/kpMWt67K4QSRF8ceQvQWXm/image.png?auth_key=1722782126-7LKCC1w4hA84wyMEyNNmiG-0-cfd30b75c6a647fd5a890f0e7a74b197)
+![image_tIa2r9EFhz.png](https://krseoul.imgtbl.com/i/2024/08/05/66b0965030579.png)
 
 为了确保Server能够过滤重复请求，客户端在发起请求时，携带ID（随机数）和Req（请求序号）。服务端在内存中定义Map数据结构哦，保存请求客户端的ID和下一个Req。当请求来临时，Server通过检查自己保存的Req是否等于请求的Req，来判断是否重复请求。如果保存的Req和Client的请求Req相等时则是新的请求，执行指令；否则是重复请求，返回缓存的数据。
 
@@ -302,7 +302,7 @@ go test
 
 ```
 
-![](https://secure2.wostatic.cn/static/gqiUoKPf9aLx4iTwcNgDJ4/image.png?auth_key=1722782843-31ENBW6G1PSvk8YMuTu6q4-0-aec1c0b9fd042ca04e3e166c20782a9b)
+![image_zxJo3Gnd8I.png](https://krseoul.imgtbl.com/i/2024/08/05/66b09678a89eb.png)
 
 MIT6.5840 课程Lab完整项目
 

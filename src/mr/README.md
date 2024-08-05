@@ -10,7 +10,7 @@ Lab 地址
 
 简单来讲，MapReduce是一种分布式框架，可以用来处理大规模数据。该框架抽象了两个接口，分别是`Map`和`Reduce`函数：
 
-![](https://secure2.wostatic.cn/static/9uw3tbTj1Fg74P2Yutcbip/image.png?auth_key=1722169161-xdY7qgdjR1fa8MdCewdj3R-0-cd019a4528929fff1a6f28099e5c94e8)
+![image_HhEEQ77FDN.png](https://krseoul.imgtbl.com/i/2024/08/05/66b096ce2430c.png)
 
 凡是符合这个模式的算法都可以使用该框架来实现并行化，执行流程如下图所示。
 
