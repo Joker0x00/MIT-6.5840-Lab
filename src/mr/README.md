@@ -14,7 +14,7 @@ Lab 地址
 
 凡是符合这个模式的算法都可以使用该框架来实现并行化，执行流程如下图所示。
 
-![](https://secure2.wostatic.cn/static/geqjDV5FABHbaRYT1Hn8CE/image.png?auth_key=1722168989-sYN81Ezq25rBu1SY6PKAEn-0-2acc99e74bcbfe937cd7dc0a6aa59ebc)
+![image_VMaI8CECKG.png](https://krseoul.imgtbl.com/i/2024/08/05/66b0b90260d06.png)
 
 整个框架分为Master和Worker，Master负责分配`map`和`reduce`任务，Worker负责向Master申请任务并执行。执行流程如下：
 
@@ -31,7 +31,7 @@ Reduce阶段：
 - 将所有的kv对根据键值排序，使得相同key的kv对能够连续排列，方便合并。
 - 之后合并相同key的kv对，然后将每个key和其对应的value list输入reduce函数，得到合并的结果，再将其输出到文件中。
 
-![](https://secure2.wostatic.cn/static/u44hhhkvKiqQGsqYLrCunh/image.png?auth_key=1722170361-vQteeWmLK1kCimjiZg8QDN-0-2895a5af8c716332d5873d31144d3ab6)
+![image_DjKN1BzSk2.png](https://krseoul.imgtbl.com/i/2024/08/05/66b0b90224803.png)
 
 本文介绍了大致思想，详细内容请参考原论文。
 
@@ -513,5 +513,5 @@ go run mrworker.go wc.so
 bash test-mr.sh
 ```
 
-![](https://secure2.wostatic.cn/static/ucuDYdpVDqFJZQLGtrK4zu/image.png?auth_key=1722168821-cGemg33VQS4u26dyATAMKg-0-a60d6201196a9a40166a783467b41b1e)
+![image_U-T87EHNk2.png](https://krseoul.imgtbl.com/i/2024/08/05/66b0b901da268.png)
 
