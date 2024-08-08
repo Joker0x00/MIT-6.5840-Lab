@@ -614,12 +614,14 @@ func (rf *Raft) elect() {
 					return
 				}
 			} else {
-				rf.mu.Lock()
-				rf.role = FOLLOWER
-				rf.currentTerm = res.Term
-				rf.votedFor = -1
-				rf.stopElect = true
-				rf.mu.Unlock()
+				if res.Term > rf.currentTerm {
+					rf.mu.Lock()
+					rf.role = FOLLOWER
+					rf.currentTerm = res.Term
+					rf.votedFor = -1
+					rf.stopElect = true
+					rf.mu.Unlock()
+				}
 			}
 		case <-rf.stopProcessRoutine:
 			return
