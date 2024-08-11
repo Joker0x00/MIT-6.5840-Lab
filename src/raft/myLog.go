@@ -8,7 +8,7 @@ import (
 
 type logTopic string
 
-const debug = false
+const debug = true
 const (
 	dBug     logTopic = "DEBUG"
 	dClient  logTopic = "CLNT" //
@@ -19,8 +19,7 @@ const (
 	dError   logTopic = "ERRO" // 出现错误
 	dInfo    logTopic = "INFO" // 信息
 	dRole    logTopic = "ROLE" // 角色变更
-	dLog     logTopic = "LOG1" // log相关
-	dLog2    logTopic = "LOG2"
+	dLog     logTopic = "LOG"  // log相关
 	dPersist logTopic = "PERS"
 	dSnap    logTopic = "SNAP"
 	dTerm    logTopic = "TERM" // 任期变更
@@ -29,6 +28,7 @@ const (
 	dTrace   logTopic = "TRCE"
 	dVote    logTopic = "VOTE" // 投票事件
 	dWarn    logTopic = "WARN" // 警告事件
+	dRoutine logTopic = "ROUTINE"
 )
 
 var debugStart time.Time = time.Now()

@@ -17,8 +17,7 @@ TOPICS = {
     "AE"  : "#18ed81",
     "ROLE": "#d0b343",
     "TERM": "#70c43f",
-    "LOG1": "#4878bc",
-    "LOG2": "#398280",
+    "LOG": "#4878bc",
     "CMIT": "#e37933",
     "PERS": "#d08341",
     "SNAP": "#FD971F",
@@ -29,7 +28,8 @@ TOPICS = {
     "WARN": "#d08341",
     "ERRO": "#fe2626",
     "TRCE": "#fe2626",
-    "APPLY": "#c586c0"
+    "APPLY": "#c586c0",
+    "ROUTINE": "ffffff"
 }
 # fmt: on
 

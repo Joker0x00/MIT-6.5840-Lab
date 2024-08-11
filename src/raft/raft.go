@@ -20,13 +20,16 @@ package raft
 import (
 	//	"bytes"
 
+	"bytes"
 	"math/rand"
+	"runtime"
 	"sort"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	//	"6.5840/labgob"
+	"6.5840/labgob"
 	"6.5840/labrpc"
 )
 
@@ -34,6 +37,7 @@ const (
 	LEADER = iota
 	CANDIDATE
 	FOLLOWER
+	NONE
 )
 
 func Min(a, b int) int {
@@ -90,9 +94,9 @@ type Raft struct {
 	// state a Raft server must maintain.
 	stopElect          bool
 	stopLeader         bool
-	currentTerm        int
-	votedFor           int
-	log                []Entry
+	currentTerm        int     // 持久化存储
+	votedFor           int     // 持久化存储
+	log                []Entry // 持久化存储
 	commitIndex        int
 	lastApplied        int
 	nextIndex          []int
@@ -106,6 +110,8 @@ type Raft struct {
 	stopAESend         chan bool
 	applySignal        chan bool
 	stopRun            chan bool
+	routineCnt         int
+	G                  map[string]int
 }
 
 type RequestVoteArgs struct {
@@ -143,13 +149,13 @@ func (rf *Raft) GetState() (int, bool) {
 // (or nil if there's not yet a snapshot).
 func (rf *Raft) persist() {
 	// Your code here (3C).
-	// Example:
-	// w := new(bytes.Buffer)
-	// e := labgob.NewEncoder(w)
-	// e.Encode(rf.xxx)
-	// e.Encode(rf.yyy)
-	// raftstate := w.Bytes()
-	// rf.persister.Save(raftstate, nil)
+	w := new(bytes.Buffer)
+	e := labgob.NewEncoder(w)
+	e.Encode(rf.currentTerm)
+	e.Encode(rf.votedFor)
+	e.Encode(rf.log)
+	raftstate := w.Bytes()
+	rf.persister.Save(raftstate, nil)
 }
 
 // restore previously persisted state.
@@ -158,18 +164,20 @@ func (rf *Raft) readPersist(data []byte) {
 		return
 	}
 	// Your code here (3C).
-	// Example:
-	// r := bytes.NewBuffer(data)
-	// d := labgob.NewDecoder(r)
-	// var xxx
-	// var yyy
-	// if d.Decode(&xxx) != nil ||
-	//    d.Decode(&yyy) != nil {
-	//   error...
-	// } else {
-	//   rf.xxx = xxx
-	//   rf.yyy = yyy
-	// }
+	r := bytes.NewBuffer(data)
+	d := labgob.NewDecoder(r)
+	var currentTerm int
+	var votedFor int
+	var log []Entry
+	if d.Decode(&currentTerm) != nil ||
+		d.Decode(&votedFor) != nil ||
+		d.Decode(&log) != nil {
+
+	} else {
+		rf.currentTerm = currentTerm
+		rf.votedFor = votedFor
+		rf.log = log
+	}
 }
 
 // the service says it has created a snapshot that has
@@ -223,6 +231,7 @@ type AppendEntriesReply struct {
 	Success  bool
 	ServerId int
 	XIndex   int
+	XIdx     int
 }
 
 // the service using Raft (e.g. a k/v server) wants to start
@@ -249,9 +258,9 @@ func (rf *Raft) Start(command interface{}) (int, int, bool) {
 		Conmmand: command,
 		Term:     term,
 	})
-	Printf(dClient, "s%v: command %v, lastidx: %v", rf.me, command, len(rf.log)-1)
+	rf.persist()
+	Printf(dClient, "s%v: command %v, term: %v, lastidx: %v", rf.me, command, rf.currentTerm, len(rf.log)-1)
 	rf.mu.Unlock()
-	rf.resetAETimer <- true
 	return index, term, true
 }
 
@@ -268,16 +277,17 @@ func (rf *Raft) Kill() {
 	atomic.StoreInt32(&rf.dead, 1)
 	// Your code here, if desired.
 	Printf(dInfo, "s%v is killed", rf.me)
-	rf.resetElectTimer <- true
-	rf.stopProcessRoutine <- true
-	rf.stopProcessRoutine <- true
-	rf.stopAESend <- true
-	rf.stopRun <- true
-	rf.stopRun <- true
 	rf.mu.Lock()
 	rf.stopLeader = true
 	rf.stopElect = true
+	rf.role = NONE
 	rf.mu.Unlock()
+	rf.stopProcessRoutine <- true // 终止Vote or AE process
+	// 终止AE
+	rf.stopRun <- true // 终止Apply和ticker
+	rf.stopRun <- true
+
+	close(rf.applyChan)
 }
 
 func (rf *Raft) killed() bool {
@@ -287,7 +297,10 @@ func (rf *Raft) killed() bool {
 
 func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply) {
 	rf.mu.Lock()
-
+	if rf.killed() {
+		rf.mu.Unlock()
+		return
+	}
 	if args.Term > rf.currentTerm {
 		if rf.role == LEADER {
 			Printf(dRole, "s%v: leader -> follower", rf.me)
@@ -299,35 +312,59 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		} else if rf.role == CANDIDATE {
 			rf.stopElect = true
 			rf.stopProcessRoutine <- true
+		} else {
+			return
 		}
 		rf.role = FOLLOWER
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 	}
 
 	term := -1
 	if args.PrevLogIndex > 0 && args.PrevLogIndex <= len(rf.log)-1 {
 		term = rf.log[args.PrevLogIndex].Term
 	}
+	reply.XIdx = -1
 	if args.Term == rf.currentTerm && (args.PrevLogIndex <= len(rf.log)-1 && term == args.PrevLogTerm) {
-		Printf(dAE, "s%v receive ae from s%v: T%v, T%v, li %v lt %v", rf.me, args.LeaderId, rf.currentTerm, args.Term, len(rf.log)-1, rf.log[len(rf.log)-1].Term)
 		rf.votedFor = args.LeaderId
 		rf.currentTerm = args.Term
 		rf.resetElectTimer <- true
 		reply.Success = true
 		reply.Term = rf.currentTerm
 		reply.ServerId = rf.me
+		reply.XIdx = args.PrevLogIndex
 		if len(args.Entries) > 0 {
-			rf.log = rf.log[:args.PrevLogIndex+1]
-			rf.log = append(rf.log, args.Entries...)
-			Printf(dLog, "s%v add log len %v, li: %v, lt: %v", rf.me, len(args.Entries), len(rf.log)-1, rf.log[len(rf.log)-1].Term)
+			Printf(dAE, "s%v receive ae from s%v: T%v, T%v; pi %v pt %v", rf.me, args.LeaderId, rf.currentTerm, args.Term, args.PrevLogIndex, args.PrevLogTerm)
+			i, j := args.PrevLogIndex+1, 0
+			for i < len(rf.log) && j < len(args.Entries) {
+				if rf.log[i] != args.Entries[j] {
+					break
+				}
+				i++
+				j++
+			}
+			Printf(dLog, "s%v, i: %v, j: %v, pi: %v, log len: %v, entry len: %v", rf.me, i, j, args.PrevLogIndex, len(rf.log), len(args.Entries))
+			if j == len(args.Entries) {
+
+			} else if i == len(rf.log) {
+				rf.log = append(rf.log, args.Entries[j:]...)
+			} else if rf.log[i] != args.Entries[j] {
+				// 有冲突，但并未走到头
+				rf.log = rf.log[:i]
+				rf.log = append(rf.log, args.Entries[j:]...) // 不能直接截断
+			}
+			reply.XIdx = len(rf.log) - 1
+
+			Printf(dLog, "s%v add log, arg entries: %v, after: %v, li: %v, lt: %v, XIdx: %v", rf.me, args.Entries[j:], rf.log, len(rf.log)-1, rf.log[len(rf.log)-1].Term, reply.XIdx)
 		}
+		rf.persist()
 
 		if rf.role == LEADER {
 			Printf(dAE, "s%v: leader -> follower", rf.me)
 			rf.stopLeader = true
 			rf.stopProcessRoutine <- true
-			rf.resetAETimer <- true
+			rf.stopAESend <- true
 		} else if rf.role == FOLLOWER {
 
 		} else if rf.role == CANDIDATE {
@@ -345,6 +382,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		reply.Term = rf.currentTerm
 		reply.ServerId = rf.me
 		if args.Term == rf.currentTerm {
+			// 返回冲突信息，减少AE次数
 			if args.PrevLogIndex <= len(rf.log)-1 {
 				for i := args.PrevLogIndex; i > 0; i-- {
 					if rf.log[i].Term == term {
@@ -356,50 +394,48 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			} else {
 				reply.XIndex = len(rf.log)
 			}
+			rf.resetElectTimer <- true // 尽管没有AE成功，但是也要重置计时器，因为大多数服务器认为它就是leader，否则当需要回退log较多时超过选举计时器触发选举
+			Printf(dAE, "s%v <- s%v: log confilict: i %v, t_me %v, t %v", rf.me, args.LeaderId, args.PrevLogIndex, term, args.PrevLogTerm)
 		} else {
 			reply.XIndex = -1
+			Printf(dAE, "s%v <- s%v: drop AE", rf.me, args.LeaderId)
 		}
-		Printf(dAE, "s%v don't receive ae: li %v, lt %v, T %v; arg: pli %v, plt %v, T %v", rf.me, len(rf.log)-1, term, rf.currentTerm, args.PrevLogIndex, args.PrevLogTerm, args.Term)
-		// 返回冲突信息，减少AE次数
 	}
 	rf.mu.Unlock()
 }
 func (rf *Raft) sendAppendEntries(server int, args *AppendEntriesArgs, apResult chan *AppendEntriesReply) {
+	rf.addG("send1AE")
+	defer rf.deleteG("send1AE")
 	reply := AppendEntriesReply{}
-	retryTimes := 3
-	for {
+	// retryTimes := 3
+	rf.mu.Lock()
+	flag := rf.role != LEADER
+	rf.mu.Unlock()
+	if flag {
+		return
+	}
+	ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
+	if ok {
 		rf.mu.Lock()
-		flag := rf.stopLeader
+		flag := args.Term != rf.currentTerm || rf.role != LEADER
 		rf.mu.Unlock()
 		if flag {
 			return
 		}
-		ok := rf.peers[server].Call("Raft.AppendEntries", args, &reply)
-		if ok {
-			rf.mu.Lock()
-			Printf(dAE, "s%v receive ae response from s%v: T%v, T%v", rf.me, server, rf.currentTerm, reply.Term)
-			rf.mu.Unlock()
-			apResult <- &reply
-			return
-		} else {
-			retryTimes--
-			if retryTimes < 0 {
-				return
-			}
-			time.Sleep(time.Duration(100) * time.Millisecond)
-		}
+		apResult <- &reply
 	}
 }
 func (rf *Raft) sendAE(apResult chan *AppendEntriesReply) {
-	for {
+	rf.addG("sendAllAE")
+	defer rf.deleteG("sendAllAE")
+	for !rf.killed() {
 		rf.mu.Lock()
-		flag := (rf.role == LEADER)
+		flag := (rf.role != LEADER)
 		rf.aeCnt = 1
 		rf.mu.Unlock()
-		if !flag {
+		if flag {
 			return
 		}
-
 		select {
 		case <-time.After(time.Duration(rf.aeInterval) * time.Millisecond):
 			for i := 0; i < rf.tot; i++ {
@@ -407,6 +443,10 @@ func (rf *Raft) sendAE(apResult chan *AppendEntriesReply) {
 					continue
 				}
 				rf.mu.Lock()
+				if rf.role != LEADER || rf.killed() {
+					rf.mu.Unlock()
+					return
+				}
 				// 发送AP
 				prevLogIndex := rf.nextIndex[i] - 1
 				prevLogTerm := -1
@@ -425,32 +465,37 @@ func (rf *Raft) sendAE(apResult chan *AppendEntriesReply) {
 				Printf(dAE, "s%v send ae to s%d: T%v, pli: %v, plt: %v", rf.me, i, args.Term, prevLogIndex, prevLogTerm)
 				go rf.sendAppendEntries(i, &args, apResult)
 			}
-		case <-rf.resetAETimer:
 		case <-rf.stopAESend:
 			return
 		}
 	}
 }
 func (rf *Raft) processAE(apResult chan *AppendEntriesReply) {
-	for {
+	rf.addG("processAE")
+	defer rf.deleteG("processAE")
+	for !rf.killed() {
 		select {
 		case res := <-apResult:
 			rf.mu.Lock()
 			if res.Term > rf.currentTerm {
 				// 转变为follower
-				Printf(dRole, "s%v: leader -> follower", rf.me)
+				Printf(dRole, "s%v: leader -> follower, processAE", rf.me)
 				rf.currentTerm = res.Term
 				rf.role = FOLLOWER
 				rf.stopAESend <- true
 				rf.votedFor = -1
+				rf.persist()
 				rf.mu.Unlock()
 				return
 			} else {
 				if res.Success {
-					rf.matchIndex[res.ServerId] = len(rf.log) - 1
-					rf.nextIndex[res.ServerId] = len(rf.log)
+					// 大问题
+					// rf.matchIndex[res.ServerId] += res.XLen // 这个就有问题了，leader会提前提交没有agree的entry
+					// rf.nextIndex[res.ServerId] += res.XLen  // 虽然next可以调整，但是会浪费时间
+					rf.matchIndex[res.ServerId] = res.XIdx
+					rf.nextIndex[res.ServerId] = res.XIdx + 1
 					rf.aeCnt++
-					Printf(dAE, "s%v update s%v's mi: %v, ni: %v", rf.me, res.ServerId, len(rf.log)-1, len(rf.log))
+					Printf(dAE, "s%v update s%v's mi: %v, ni: %v", rf.me, res.ServerId, rf.matchIndex[res.ServerId], rf.nextIndex[res.ServerId])
 					if rf.aeCnt > rf.tot/2 {
 						// receive response
 						Printf(dAE, "s%v receive ae response half: %d", rf.me, rf.aeCnt)
@@ -458,6 +503,7 @@ func (rf *Raft) processAE(apResult chan *AppendEntriesReply) {
 						copy(tmp, rf.matchIndex)
 						sort.Ints(tmp)
 						n := tmp[rf.tot/2]
+						Printf(dCommit, "s%v pre commit idx: %v, pre: %v", rf.me, n, rf.commitIndex)
 						if n > rf.commitIndex && rf.log[n].Term == rf.currentTerm {
 							rf.commitIndex = n
 							Printf(dCommit, "s%v commit: %v", rf.me, n)
@@ -466,8 +512,8 @@ func (rf *Raft) processAE(apResult chan *AppendEntriesReply) {
 					}
 				} else {
 					if res.XIndex != -1 {
-						rf.nextIndex[res.ServerId] = res.XIndex
-						Printf(dAE, "s%v decrease ni %v for %v", rf.me, rf.nextIndex[res.ServerId], res.ServerId)
+						rf.nextIndex[res.ServerId] = Min(rf.nextIndex[res.ServerId], res.XIndex) // 超时rpc覆盖next数组
+						Printf(dAE, "s%v <- s%v: update ni: %v", rf.me, res.ServerId, rf.nextIndex[res.ServerId])
 					}
 				}
 			}
@@ -479,6 +525,8 @@ func (rf *Raft) processAE(apResult chan *AppendEntriesReply) {
 }
 
 func (rf *Raft) leader() {
+	rf.addG("leader")
+	defer rf.deleteG("leader")
 	// run leader
 	rf.mu.Lock()
 	rf.role = LEADER
@@ -500,7 +548,11 @@ func (rf *Raft) leader() {
 func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 	// Your code here (3A, 3B).
 	rf.mu.Lock()
-	Printf(dVote, "s%v receive vote request from s%v: T%v, T%v", rf.me, args.CandidateId, rf.currentTerm, args.Term)
+	if rf.killed() {
+		rf.mu.Unlock()
+		return
+	}
+	Printf(dVote, "s%v receive vote request from s%v: T%v, T%v, li %v, lt %v", rf.me, args.CandidateId, rf.currentTerm, args.Term, args.LastLogIndex, args.LastLogTerm)
 
 	if args.Term > rf.currentTerm {
 		if rf.role == LEADER {
@@ -518,6 +570,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.role = FOLLOWER
 		rf.currentTerm = args.Term
 		rf.votedFor = -1
+		rf.persist()
 	}
 
 	lastLogIdx := len(rf.log) - 1
@@ -532,6 +585,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		// 投票
 		Printf(dVote, "s%v vote for s%v", rf.me, args.CandidateId)
 		rf.votedFor = args.CandidateId
+		rf.persist()
 		reply.Term = args.Term
 		reply.VoteGranted = true
 		rf.resetElectTimer <- true
@@ -543,39 +597,41 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 }
 
 func (rf *Raft) sendRequestVote(server int, args *RequestVoteArgs, voteResult chan *RequestVoteReply) {
+	rf.addG("send1Vote")
+	defer rf.deleteG("send1Vote")
 	reply := RequestVoteReply{}
-	retryTimes := 3
-	for {
+	// retryTimes := 3
+
+	rf.mu.Lock()
+	flag := rf.role != CANDIDATE
+	rf.mu.Unlock()
+	if flag {
+		return
+	}
+
+	Printf(dVote, "s%v send vote request to s%v: T%v", rf.me, server, args.Term)
+
+	ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
+	if ok {
 		rf.mu.Lock()
-		flag := rf.stopElect
+		flag := (args.Term != rf.currentTerm || rf.role != CANDIDATE)
 		rf.mu.Unlock()
 		if flag {
 			return
 		}
-
-		Printf(dVote, "s%v send vote request to s%v: T%v", rf.me, server, args.Term)
-
-		ok := rf.peers[server].Call("Raft.RequestVote", args, &reply)
-		if ok {
-			voteResult <- &reply
-			Printf(dVote, "s%v receive vote response from s%v", rf.me, server)
-			return
-		} else {
-			retryTimes--
-			if retryTimes < 0 {
-				return
-			}
-			time.Sleep(time.Duration(50) * time.Millisecond)
-		}
+		voteResult <- &reply
+		// Printf(dVote, "s%v receive vote response from s%v", rf.me, server)
 	}
 }
 
 func (rf *Raft) elect() {
+	rf.addG("elect")
+	defer rf.deleteG("elect")
 	rf.mu.Lock()
 	rf.currentTerm++
-	rf.role = CANDIDATE
 	rf.votedFor = rf.me
-	rf.stopElect = false
+	rf.persist()
+	rf.role = CANDIDATE
 	term := rf.currentTerm
 	lastlogIdx := len(rf.log) - 1
 	lastLogTerm := -1
@@ -596,10 +652,18 @@ func (rf *Raft) elect() {
 		if i == rf.me {
 			continue
 		}
+		// 选举期间运行
 		go rf.sendRequestVote(i, &args, voteResult)
 	}
 	voteNum := 1
-	for {
+	// 选举期间运行
+	for !rf.killed() {
+		rf.mu.Lock()
+		if rf.role != CANDIDATE {
+			rf.mu.Unlock()
+			return
+		}
+		rf.mu.Unlock()
 		select {
 		case res := <-voteResult:
 			if res.VoteGranted {
@@ -610,26 +674,35 @@ func (rf *Raft) elect() {
 					// 收到一半以上投票
 					// 转为Leader
 					Printf(dVote, "s%v vote half num: %v", rf.me, voteNum)
+					// 不是leader了要立即退出
 					go rf.leader()
 					return
 				}
 			} else {
+				rf.mu.Lock()
 				if res.Term > rf.currentTerm {
-					rf.mu.Lock()
 					rf.role = FOLLOWER
 					rf.currentTerm = res.Term
 					rf.votedFor = -1
+					rf.persist()
 					rf.stopElect = true
 					rf.mu.Unlock()
+					return
 				}
+				rf.mu.Unlock()
 			}
+
 		case <-rf.stopProcessRoutine:
 			return
 		}
 	}
 }
 
+// 被kill前一直保持运行状态
 func (rf *Raft) ticker() {
+	rf.addG("ticker")
+	defer rf.deleteG("ticker")
+
 	for !rf.killed() {
 
 		// Your code here (3A)
@@ -637,32 +710,37 @@ func (rf *Raft) ticker() {
 
 		// pause for a random amount of time between 50 and 350
 		// milliseconds.
-		ms := 400 + (rand.Int63() % 200)
-		Printf(dTimer, "s%v reset timer: %v", rf.me, ms)
+		ms := 400 + (rand.Int63() % 350)
+		Printf(dTimer, "s%v reset timer: %v, routine: %v", rf.me, ms, runtime.NumGoroutine())
 		select {
 		case <-time.After(time.Duration(ms) * time.Millisecond):
 			rf.mu.Lock()
 			if rf.role != LEADER {
 				if rf.role == CANDIDATE {
 					// 结束选举进程
+					Printf(dVote, "s%v last elect over", rf.me)
+					// 结束选举相关内容
 					rf.stopElect = true
+					rf.role = FOLLOWER
+					rf.stopProcessRoutine <- true // 有点用处，基本能过1000，但还是偶尔有问题
 				}
-				// 开启新的一轮选举
+				// 开启新的一轮选举 只有在选举期间运行，不在选举立即退出
 				go rf.elect()
 			}
 			rf.mu.Unlock()
 		case <-rf.resetElectTimer:
-
+		case <-rf.stopRun:
+			return
 		}
 	}
-	rf.mu.Lock()
-	rf.stopElect = true
-	rf.stopLeader = true
-	rf.mu.Unlock()
 }
 
+// server被kill后关闭，否则一直运行
 func (rf *Raft) applyEntries() {
-	for {
+	rf.addG("apply")
+	defer rf.deleteG("apply")
+
+	for !rf.killed() {
 		select {
 		case <-rf.applySignal:
 			// apply committed log entries
@@ -680,11 +758,32 @@ func (rf *Raft) applyEntries() {
 				rf.mu.Lock()
 			}
 			rf.mu.Unlock()
-		case <-rf.stopRun:
+		case <-rf.stopRun: // 一个终止运行即可
 			return
 		}
 	}
 }
+
+func (rf *Raft) addG(g string) {
+	// rf.mu.Lock()
+	// rf.routineCnt++
+	// rf.G[g]++
+	// Printf(dRoutine, "s%v addG: %v; %v", rf.me, g, rf.G)
+	// rf.mu.Unlock()
+}
+func (rf *Raft) deleteG(g string) {
+	// rf.mu.Lock()
+	// rf.routineCnt--
+	// rf.G[g]--
+	// Printf(dRoutine, "s%v deleteG: %v; %v", rf.me, g, rf.G)
+	// rf.mu.Unlock()
+}
+
+// func (rf *Raft) getG() int {
+// 	rf.mu.Lock()
+// 	defer rf.mu.Unlock()
+// 	return rf.routineCnt
+// }
 
 // the service or tester wants to create a Raft server. the ports
 // of all the Raft servers (including this one) are in peers[]. this
@@ -714,16 +813,18 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.stopElect = true
 	rf.role = FOLLOWER
 	rf.aeCnt = 0
-	rf.aeInterval = 100
+	rf.aeInterval = 150
 	rf.resetElectTimer = make(chan bool, 1)
 	rf.resetAETimer = make(chan bool, 1)
 	rf.stopProcessRoutine = make(chan bool, 2)
 	rf.applySignal = make(chan bool, 30)
 	rf.stopRun = make(chan bool, 10)
 	rf.stopAESend = make(chan bool, 1)
+	rf.routineCnt = 0
+	rf.G = make(map[string]int)
 	// initialize from state persisted before a crash
 	rf.readPersist(persister.ReadRaftState())
-
+	Printf(dPersist, "s%v start", rf.me)
 	// start ticker goroutine to start elections
 	go rf.ticker()
 	go rf.applyEntries()

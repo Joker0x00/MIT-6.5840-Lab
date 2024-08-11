@@ -2,5 +2,7 @@ pkg/
 api.key
 .api.key.trimmed
 *-handin.tar.gz
-main/mr-tmp/*
-main/mr-*
+src/main/mr-tmp/*
+src/main/mr-*
+src/raft/res/*
+src/raft/*.log
