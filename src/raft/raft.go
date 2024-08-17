@@ -326,13 +326,13 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 		if rf.role == LEADER {
 			Printf(dRole, "s%v: leader -> follower", rf.me)
 			rf.stopLeader = true
-			rf.stopProcessRoutine <- true // 终止处理AE response的goroutine
+			rf.stopAEProcess() // 终止处理AE response的goroutine
 			// rf.stopAESend <- true
 		} else if rf.role == FOLLOWER {
 
 		} else if rf.role == CANDIDATE {
 			rf.stopElect = true
-			rf.stopProcessRoutine <- true
+			rf.stopAEProcess()
 		} else {
 			return
 		}
@@ -357,7 +357,7 @@ func (rf *Raft) InstallSnapshot(args *InstallSnapshotArgs, reply *InstallSnapsho
 			rf.lastApplied = rf.log.StartIdx - 1
 			rf.commitIndex = rf.log.StartIdx - 1
 			rf.snapshot = args.Data
-			rf.resetElectTimer <- true
+			rf.resetTimer()
 			snapApplyMsg := ApplyMsg{
 				CommandValid:  false,
 				SnapshotValid: true,
@@ -440,7 +440,7 @@ func (rf *Raft) Kill() {
 	rf.stopElect = true
 	rf.role = NONE
 	rf.mu.Unlock()
-	rf.stopProcessRoutine <- true // 终止Vote or AE process
+	rf.stopAEProcess() // 终止Vote or AE process
 	// 终止AE
 	rf.stopRun <- true // 终止Apply和ticker
 	rf.stopRun <- true
@@ -462,13 +462,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.role == LEADER {
 			Printf(dRole, "s%v: leader -> follower", rf.me)
 			rf.stopLeader = true
-			rf.stopProcessRoutine <- true // 终止处理AE response的goroutine
+			rf.stopAEProcess() // 终止处理AE response的goroutine
 			// rf.stopAESend <- true
 		} else if rf.role == FOLLOWER {
 
 		} else if rf.role == CANDIDATE {
 			rf.stopElect = true
-			rf.stopProcessRoutine <- true
+			rf.stopAEProcess()
 		} else {
 			return
 		}
@@ -484,7 +484,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 	if args.Term == rf.currentTerm && (args.PrevLogIndex <= rf.log.getLastIdx() && term == args.PrevLogTerm) {
 		rf.votedFor = args.LeaderId
 		rf.currentTerm = args.Term
-		rf.resetElectTimer <- true
+		rf.resetTimer()
 		reply.Success = true
 		reply.Term = rf.currentTerm
 		reply.ServerId = rf.me
@@ -517,13 +517,13 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 		if rf.role == LEADER {
 			Printf(dAE, "s%v: leader -> follower", rf.me)
 			rf.stopLeader = true
-			rf.stopProcessRoutine <- true
+			rf.stopAEProcess()
 			// rf.stopAESend <- true
 		} else if rf.role == FOLLOWER {
 
 		} else if rf.role == CANDIDATE {
 			rf.stopElect = true
-			rf.stopProcessRoutine <- true
+			rf.stopAEProcess()
 		}
 		rf.role = FOLLOWER
 		if args.LeaderCommit > rf.commitIndex {
@@ -548,7 +548,7 @@ func (rf *Raft) AppendEntries(args *AppendEntriesArgs, reply *AppendEntriesReply
 			} else {
 				reply.XIndex = rf.log.getLen()
 			}
-			rf.resetElectTimer <- true // 尽管没有AE成功，但是也要重置计时器，因为大多数服务器认为它就是leader，否则当需要回退log较多时超过选举计时器触发选举
+			rf.resetTimer() // 尽管没有AE成功，但是也要重置计时器，因为大多数服务器认为它就是leader，否则当需要回退log较多时超过选举计时器触发选举
 			Printf(dAE, "s%v <- s%v: log confilict: i %v, t_me %v, t %v", rf.me, args.LeaderId, args.PrevLogIndex, term, args.PrevLogTerm)
 		} else {
 			reply.XIndex = -1
@@ -733,7 +733,7 @@ func (rf *Raft) leader() {
 	rf.mu.Lock()
 	rf.role = LEADER
 	rf.stopLeader = false
-	rf.resetElectTimer <- true
+	rf.resetTimer()
 	for i := 0; i < rf.tot; i++ {
 		rf.nextIndex[i] = rf.log.getLen()
 		rf.matchIndex[i] = -1
@@ -763,14 +763,14 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		if rf.role == LEADER {
 			Printf(dRole, "s%v: leader -> follower", rf.me)
 			rf.stopLeader = true
-			rf.stopProcessRoutine <- true // 终止处理AE response的goroutine
+			rf.stopAEProcess() // 终止处理AE response的goroutine
 			// rf.stopAESend <- true
 		} else if rf.role == FOLLOWER {
 
 		} else if rf.role == CANDIDATE {
 			Printf(dRole, "s%v: candidate -> follower", rf.me)
 			rf.stopElect = true
-			rf.stopProcessRoutine <- true
+			rf.stopAEProcess()
 		}
 		rf.role = FOLLOWER
 		rf.currentTerm = args.Term
@@ -788,7 +788,7 @@ func (rf *Raft) RequestVote(args *RequestVoteArgs, reply *RequestVoteReply) {
 		rf.votedFor = args.CandidateId
 		reply.Term = args.Term
 		reply.VoteGranted = true
-		rf.resetElectTimer <- true
+		rf.resetTimer()
 	} else {
 		reply.VoteGranted = false
 		reply.Term = rf.currentTerm
@@ -900,6 +900,21 @@ func (rf *Raft) elect() {
 		}
 	}
 }
+func (rf *Raft) resetTimer() {
+	select {
+	case rf.resetElectTimer <- true:
+	default:
+		Printf(dWarn, "s%v resetElectTimer blocked")
+	}
+}
+
+func (rf *Raft) stopAEProcess() {
+	select {
+	case rf.stopProcessRoutine <- true:
+	default:
+		Printf(dWarn, "s%v stopAEProcess blocked")
+	}
+}
 
 // 被kill前一直保持运行状态
 func (rf *Raft) ticker() {
@@ -918,7 +933,7 @@ func (rf *Raft) ticker() {
 					// 结束选举相关内容
 					rf.stopElect = true
 					rf.role = FOLLOWER
-					rf.stopProcessRoutine <- true // 有点用处，基本能过1000，但还是偶尔有问题
+					rf.stopAEProcess()
 				}
 				// 开启新的一轮选举 只有在选举期间运行，不在选举立即退出
 				go rf.elect()
@@ -996,7 +1011,7 @@ func Make(peers []*labrpc.ClientEnd, me int,
 	rf.aeInterval = 50
 	rf.resetElectTimer = make(chan bool, 1)    // 1
 	rf.stopProcessRoutine = make(chan bool, 2) // 2
-	rf.applySignal = make(chan bool, 100)      // 30
+	rf.applySignal = make(chan bool, 30)       // 30
 	rf.stopRun = make(chan bool, 2)            // 10
 
 	rf.readPersist(persister.ReadRaftState(), persister.ReadSnapshot())
